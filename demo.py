@@ -23,8 +23,8 @@ def show_image(image):
     cv2.imshow('image', image / 255.0)
     cv2.waitKey(1)
 
-def image_stream(imagedir, calib, depthdir=None, stride=1):
-    """image generator yielding (t, image, depth, intrinsics)"""
+def image_stream(imagedir, calib, depthdir=None, stride=1, t0=0):
+    """image generator yielding (tstamp, image, depth, intrinsics)"""
 
     calib = np.loadtxt(calib, delimiter=" ")
     fx, fy, cx, cy = calib[:4]
@@ -38,6 +38,16 @@ def image_stream(imagedir, calib, depthdir=None, stride=1):
     image_list = sorted(os.listdir(imagedir))[::stride]
 
     for t, imfile in enumerate(image_list):
+        if t < t0:
+            continue
+
+        # Parse timestamp from filename if numeric, else fallback to frame index t
+        stem = os.path.splitext(imfile)[0]
+        try:
+            tstamp = float(stem)
+        except ValueError:
+            tstamp = float(t)
+
         # 1. Load RGB Frame
         image = cv2.imread(os.path.join(imagedir, imfile))
         if len(calib) > 4:
@@ -93,9 +103,9 @@ def image_stream(imagedir, calib, depthdir=None, stride=1):
                         torch.from_numpy(depth_cropped).float().to("cuda")
                     )
 
-            yield t, image[None], depth_tensor, intrinsics
+            yield tstamp, image[None], depth_tensor, intrinsics
         else:
-            yield t, image[None], intrinsics
+            yield tstamp, image[None], intrinsics
 
 
 def save_reconstruction(droid, save_path):
@@ -148,6 +158,7 @@ if __name__ == '__main__':
     parser.add_argument("--backend_device", type=str, default="cuda")
     
     parser.add_argument("--reconstruction_path", help="path to saved reconstruction")
+    parser.add_argument("--trajectory_filepath", type=str, default=None, help="path to save full trajectory in TUM format (.txt)")
     args = parser.parse_args()
 
     args.stereo = False
@@ -160,10 +171,7 @@ if __name__ == '__main__':
         args.upsample = True
 
     tstamps = []
-    for (t, image, disparity, intrinsics) in tqdm(image_stream(args.imagedir, args.calib, args.depthdir, args.stride)):
-        if t < args.t0:
-            continue
-
+    for (tstamp, image, disparity, intrinsics) in tqdm(image_stream(args.imagedir, args.calib, args.depthdir, args.stride, args.t0)):
         if not args.disable_vis:
             show_image(image[0])
 
@@ -171,9 +179,18 @@ if __name__ == '__main__':
             args.image_size = [image.shape[2], image.shape[3]]
             droid = DroidAsync(args) if args.asynchronous else Droid(args)
 
-        droid.track(t, image, depth=disparity, intrinsics=intrinsics)
+        droid.track(tstamp, image, depth=disparity, intrinsics=intrinsics)
+        tstamps.append(tstamp)
     
-    traj_est = droid.terminate(image_stream(args.imagedir, args.calib, depthdir=None, stride=args.stride)) # trajectory filler doesn't accept depth tensor
+    traj_est = droid.terminate(image_stream(args.imagedir, args.calib, depthdir=None, stride=args.stride, t0=args.t0)) # trajectory filler doesn't accept depth tensor. droid.terminate does inversion to camera to world coordinates
     
     if args.reconstruction_path is not None:
         save_reconstruction(droid, args.reconstruction_path)
+
+    if args.trajectory_filepath is not None:
+        if len(tstamps) == len(traj_est):
+            traj_data = np.hstack([np.array(tstamps)[:, None], traj_est])
+        else:
+            traj_data = np.hstack([np.arange(len(traj_est))[:, None], traj_est])
+        np.savetxt(args.trajectory_filepath, traj_data, fmt="%.6f", header="timestamp tx ty tz qx qy qz qw")
+        print(f"Saved full filled trajectory ({len(traj_est)} frames) to {args.trajectory_filepath}")
