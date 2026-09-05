@@ -171,7 +171,13 @@ if __name__ == '__main__':
         args.upsample = True
 
     tstamps = []
-    for (tstamp, image, disparity, intrinsics) in tqdm(image_stream(args.imagedir, args.calib, args.depthdir, args.stride, args.t0)):
+    for item in tqdm(image_stream(args.imagedir, args.calib, args.depthdir, args.stride, args.t0)):
+        if len(item) == 4:
+            tstamp, image, disparity, intrinsics = item
+        else:
+            tstamp, image, intrinsics = item
+            disparity = None
+
         if not args.disable_vis:
             show_image(image[0])
 
